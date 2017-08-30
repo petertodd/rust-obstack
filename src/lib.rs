@@ -1,3 +1,42 @@
+//! A fast segmented stack allocator, supporting multiple objects of any type.
+//!
+//! A type of arena allocator, obstacks deallocate memory all at once, when the `Obstack` itself is
+//! destroyed. The benefit is extremely fast allocation: just a pointer bump. Unlike a typed arena,
+//! a single `Obstack` can contain values with any number of different types.
+//!
+//! For `Copy` types pushing a value to an `Obstack` returns a standard mutable reference:
+//!
+//!     # use obstack::Obstack;
+//!     # let stack = Obstack::<usize>::new();
+//!     let r: &mut u8 = stack.push_copy(42);
+//!     assert_eq!(*r, 42);
+//!
+//! As `Copy` types can't implement `Drop`, nothing needs to be done to deallocate the value beyond
+//! deallocating the memory itself, which is done en-mass when the `Obstack` itself is dropped.
+//! `push_copy()` is thus limited to types that implement `Copy`.
+//!
+//! Types that do not implement `Copy` *may* implement `Drop`. As Rust's type system doesn't have a
+//! negative `!Drop` trait, `Obstack` has a second method - `push()` - that is not restricted to
+//! `Copy` types. This method returns the wrapper type `Ref<T>`, that wraps the underlying mutable
+//! reference. This wrapper owns the value on the stack, and ensures that `drop` is
+//! called when the wrapper goes out of scope. Essentially `Ref` is the equivalent of `Box`, but
+//! using an `Obstack` rather than the heap.
+//!
+//! In practice even when the `Ref` wrapper is used, if the underlying type doesn't actually
+//! implement a meaningful `drop` method, the Rust compiler is able to optimize away all calls to
+//! `drop`, resulting in the same performance as for `Copy` types; the actual `Ref::drop()` method
+//! is `[inline(always)]` to aid this process. This is important as not all non-drop types can
+//! implement `Copy` - notably mutable references can't.
+//!
+//! `Obstack` allocates memory as a segmented stack consisting of one or more segments of
+//! contiguous memory. Each time the top segment becomes full, a new segment is allocated from the
+//! heap. To ensure the total number of allocations remains small, segments are allocated in a
+//! powers-of-two fashion, with each segment being twice the size of the previous one.
+//!
+//! Once a segment has been allocated it's stable for the life of the `Obstack`, allowing
+//! the values contained in that segment to be referenced directly; Rust lifetimes ensure that the
+//! references are valid for the lifetime of the `Obstack`.
+
 #[cfg(test)]
 extern crate rand;
 
@@ -6,11 +45,104 @@ use std::cmp;
 use std::fmt;
 use std::mem;
 use std::ptr;
-use std::slice;
 
 mod alignedvec;
 use alignedvec::AlignedVec;
 
+pub const DEFAULT_INITIAL_CAPACITY: usize = 256;
+
+/// An obstack
+#[derive(Debug)]
+pub struct Obstack<A = usize> {
+    state: UnsafeCell<State<A>>,
+}
+
+impl<A> Obstack<A> {
+    /// Constructs a new `Obstack` with the specified initial capacity.
+    ///
+    /// The obstack will be able to allocate at least `initial_capacity` bytes before having to
+    /// allocate again.
+    pub fn with_initial_capacity(initial_capacity: usize) -> Self {
+        let n = initial_capacity;
+        let n = if n.is_power_of_two() { n } else { n.next_power_of_two() };
+
+        let state = State::new(n);
+        Obstack {
+            state: UnsafeCell::new(state)
+        }
+    }
+
+    /// Constructs a new `Obstack`.
+    ///
+    /// The initial capacity will be set to `DEFAULT_INITIAL_CAPACITY`.
+    pub fn new() -> Self {
+        Self::with_initial_capacity(DEFAULT_INITIAL_CAPACITY-1)
+    }
+
+    /// Pushes a value to the `Obstack`.
+    ///
+    /// Returns a `Ref` that can be dereferenced to the value's location on the stack.
+    ///
+    ///     # use std::convert::From;
+    ///     # use obstack::{Obstack, Ref};
+    ///     # let stack = Obstack::<usize>::new();
+    ///     let r: Ref<String> = stack.push(String::from("Hello World!"));
+    ///     assert_eq!(*r, "Hello World!");
+    ///
+    #[inline]
+    pub fn push<'a, T>(&'a self, value: T) -> Ref<'a, T> {
+        let ptr = self.alloc(&value) as *mut T;
+        unsafe {
+            ptr::write(ptr, value);
+
+            Ref {
+                ptr: &mut *ptr,
+            }
+        }
+    }
+
+    /// Pushes a `Copy` value to the `Obstack`.
+    ///
+    /// Returns a mutable reference to the value on the stack.
+    ///
+    ///     # use obstack::Obstack;
+    ///     # let stack = Obstack::<usize>::new();
+    ///     let r: &mut [u8; 5] = stack.push_copy([1,2,3,4,5]);
+    ///     assert_eq!(*r, [1,2,3,4,5]);
+    ///
+    #[inline]
+    pub fn push_copy<'a, T>(&'a self, value: T) -> &'a mut T
+        where T: Copy,
+    {
+        unsafe {
+            let r = &mut *(self.alloc(&value) as *mut T);
+            *r = value;
+            r
+        }
+    }
+
+    /// Alocates memory for a value, without initializing it.
+    #[inline]
+    fn alloc<'a, T: ?Sized>(&'a self, value_ref: &T) -> *mut A {
+        let size = mem::size_of_val(value_ref);
+        let alignment = mem::align_of_val(value_ref);
+
+        if size > 0 {
+            unsafe {
+                let state = &mut *self.state.get();
+                state.alloc(size, alignment)
+            }
+        } else {
+            mem::align_of_val(value_ref) as *mut A
+        }
+    }
+}
+
+/// A wrapper referencing a value in an `Obstack`.
+///
+/// A `Ref` value is owns the value it references, and will invoke `drop` on the value when the
+/// `Ref` goes out of scope. Effectively a `Ref` is a `Box` that uses an `Obstack` rather than the
+/// heap.
 pub struct Ref<'a, T: 'a + ?Sized> {
     ptr: &'a mut T,
 }
@@ -24,7 +156,6 @@ impl<'a, T: ?Sized> Drop for Ref<'a, T> {
     }
 }
 
-pub const DEFAULT_INITIAL_CAPACITY: usize = 256;
 
 #[derive(Debug)]
 struct State<A> {
@@ -80,90 +211,6 @@ impl<A> State<A> {
     }
 }
 
-#[derive(Debug)]
-pub struct Obstack<A = usize> {
-    state: UnsafeCell<State<A>>,
-}
-
-impl<A> Obstack<A> {
-    pub fn with_initial_capacity(n: usize) -> Self {
-        let n = if n.is_power_of_two() { n } else { n.next_power_of_two() };
-
-        let state = State::new(n);
-        Obstack {
-            state: UnsafeCell::new(state)
-        }
-    }
-
-    pub fn new() -> Self {
-        Self::with_initial_capacity(DEFAULT_INITIAL_CAPACITY-1)
-    }
-
-
-    #[inline]
-    pub fn push_copy<'a, T>(&'a self, value: T) -> &'a mut T
-        where T: Copy,
-    {
-        self.push_nodrop(value)
-    }
-
-    #[inline]
-    pub fn push<'a, T>(&'a self, value: T) -> Ref<'a, T> {
-        Ref {
-            ptr: self.push_nodrop(value),
-        }
-    }
-
-    #[inline]
-    pub fn push_nodrop<'a, T>(&'a self, value: T) -> &'a mut T
-    {
-        let ptr = self.alloc(&value) as *mut T;
-        unsafe {
-            ptr::write(ptr, value);
-            &mut *ptr
-        }
-    }
-
-    #[inline]
-    pub fn copy_from_slice<'a, T>(&'a self, src: &[T]) -> &'a mut [T]
-        where T: Copy,
-    {
-        let ptr = self.alloc(src) as *mut T;
-        unsafe {
-            let dst = slice::from_raw_parts_mut(ptr, src.len());
-            dst.copy_from_slice(src);
-            dst
-        }
-    }
-
-    #[inline]
-    pub fn alloc<'a, T: ?Sized>(&'a self, value_ref: &T) -> *mut A {
-        let size = mem::size_of_val(value_ref);
-        let alignment = mem::align_of_val(value_ref);
-
-        if size > 0 {
-            unsafe {
-                let state = &mut *self.state.get();
-                state.alloc(size, alignment)
-            }
-        } else {
-            mem::align_of_val(value_ref) as *mut A
-        }
-    }
-
-    /// Return total bytes allocated
-    pub fn allocated(&self) -> usize {
-        unsafe {
-            let state = &*self.state.get();
-
-            let mut sum = state.tip.len_bytes();
-            for slab in &state.used_slabs {
-                sum += slab.len_bytes();
-            }
-            sum
-        }
-    }
-}
 
 impl fmt::Display for Obstack {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
