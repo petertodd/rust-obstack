@@ -7,7 +7,7 @@
 //! For `Copy` types pushing a value to an `Obstack` returns a standard mutable reference:
 //!
 //!     # use obstack::Obstack;
-//!     # let stack = Obstack::<usize>::new();
+//!     # let stack = Obstack::new();
 //!     let r: &mut u8 = stack.push_copy(42);
 //!     assert_eq!(*r, 42);
 //!
@@ -53,11 +53,11 @@ pub const DEFAULT_INITIAL_CAPACITY: usize = 256;
 
 /// An obstack
 #[derive(Debug)]
-pub struct Obstack<A = usize> {
-    state: UnsafeCell<State<A>>,
+pub struct Obstack {
+    state: UnsafeCell<State<usize>>,
 }
 
-impl<A> Obstack<A> {
+impl Obstack {
     /// Constructs a new `Obstack` with the specified initial capacity.
     ///
     /// The obstack will be able to allocate at least `initial_capacity` bytes before having to
@@ -85,7 +85,7 @@ impl<A> Obstack<A> {
     ///
     ///     # use std::convert::From;
     ///     # use obstack::{Obstack, Ref};
-    ///     # let stack = Obstack::<usize>::new();
+    ///     # let stack = Obstack::new();
     ///     let r: Ref<String> = stack.push(String::from("Hello World!"));
     ///     assert_eq!(*r, "Hello World!");
     ///
@@ -106,7 +106,7 @@ impl<A> Obstack<A> {
     /// Returns a mutable reference to the value on the stack.
     ///
     ///     # use obstack::Obstack;
-    ///     # let stack = Obstack::<usize>::new();
+    ///     # let stack = Obstack::new();
     ///     let r: &mut [u8; 5] = stack.push_copy([1,2,3,4,5]);
     ///     assert_eq!(*r, [1,2,3,4,5]);
     ///
@@ -123,17 +123,17 @@ impl<A> Obstack<A> {
 
     /// Alocates memory for a value, without initializing it.
     #[inline]
-    fn alloc<'a, T: ?Sized>(&'a self, value_ref: &T) -> *mut A {
+    fn alloc<'a, T: ?Sized>(&'a self, value_ref: &T) -> *mut u8 {
         let size = mem::size_of_val(value_ref);
         let alignment = mem::align_of_val(value_ref);
 
         if size > 0 {
             unsafe {
                 let state = &mut *self.state.get();
-                state.alloc(size, alignment)
+                state.alloc(size, alignment) as *mut u8
             }
         } else {
-            mem::align_of_val(value_ref) as *mut A
+            mem::align_of_val(value_ref) as *mut u8
         }
     }
 }

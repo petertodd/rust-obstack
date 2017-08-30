@@ -66,7 +66,7 @@ fn cons_list_with_obstack(bench: &mut Bencher) {
     }
 
     bench.iter(|| {
-        let stack = Obstack::<usize>::new();
+        let stack = Obstack::new();
 
         let mut tip = RefCons::Nil;
         for i in 0 .. CONS_ITERS {
@@ -93,7 +93,7 @@ fn str_cons_list_stack(bench: &mut Bencher) {
     use std::string::ToString;
 
     bench.iter(|| {
-        let stack = Obstack::<usize>::new();
+        let stack = Obstack::new();
 
         let mut tip = RefCons::Nil;
         for i in 0 .. CONS_ITERS {
