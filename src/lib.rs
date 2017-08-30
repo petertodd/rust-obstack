@@ -356,19 +356,20 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct DropCounter<'a> {
+        count_ref: &'a Cell<usize>,
+    }
+
+    impl<'a> Drop for DropCounter<'a> {
+        fn drop(&mut self) {
+            self.count_ref.set(self.count_ref.get() + 1);
+        }
+    }
+
     #[test]
     fn test_ref_drop() {
         let stack: Obstack = Obstack::new();
-
-        struct DropCounter<'a> {
-            count_ref: &'a Cell<usize>,
-        }
-
-        impl<'a> Drop for DropCounter<'a> {
-            fn drop(&mut self) {
-                self.count_ref.set(self.count_ref.get() + 1);
-            }
-        }
 
         let drop_counts = vec![Cell::new(0); 10000];
         let mut dropcounter_refs = Vec::new();
@@ -416,5 +417,33 @@ mod tests {
             let r = stack.push(12345);
             assert_eq!(*r, 12345);
         });
+    }
+
+    #[test]
+    fn test_recursive_ref() {
+        let drop_count = Cell::new(0);
+        {
+            let stack: Obstack = Obstack::new();
+
+            // Store the drop counter on the stack:
+            let r1 = stack.push(DropCounter { count_ref: &drop_count });
+            assert_eq!(drop_count.get(), 0);
+
+            // We got a reference to the drop counter in return.
+            //
+            // Now store that reference on the stack:
+            let r_r1 = stack.push(r1);
+
+            // r_r1 is now the thing responsible for dropping the drop counter!
+
+            assert_eq!(drop_count.get(), 0);
+
+            // So let's drop it:
+            mem::drop(r_r1);
+            assert_eq!(drop_count.get(), 1);
+        }
+
+        // Dropping the stack itself does nothing to the drop counter of course.
+        assert_eq!(drop_count.get(), 1);
     }
 }
