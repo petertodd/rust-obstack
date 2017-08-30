@@ -1,5 +1,3 @@
-extern crate arrayvec;
-
 use std::cell::RefCell;
 use std::cmp;
 use std::fmt::Write;
@@ -8,8 +6,6 @@ use std::marker::PhantomData;
 use std::mem;
 use std::ptr;
 use std::slice;
-
-use arrayvec::{ArrayVec, Array};
 
 pub struct Ref<'a, T: 'a + ?Sized> {
     ptr: &'a mut T,
@@ -25,14 +21,12 @@ impl<'a, T: ?Sized> Drop for Ref<'a, T> {
 }
 
 
-// Most processors have only 48 bits of actual virtual address space
-const MIN_SLAB_SIZE: usize = 256;
-const MAX_SLABS: usize = 48 - 8;
+pub const DEFAULT_INITIAL_CAPACITY: usize = 256;
 
 #[derive(Debug)]
 struct State {
-    used_slabs: ArrayVec<[Vec<u8>; MAX_SLABS]>,
     tip: Vec<u8>,
+    used_slabs: Vec<Vec<u8>>,
 }
 
 impl State {
@@ -44,16 +38,12 @@ impl State {
 
     fn new(min_initial_capacity: usize) -> State {
         State {
-           used_slabs: ArrayVec::new(),
            tip: Vec::with_capacity(Self::next_capacity(0, min_initial_capacity, 0)),
+           used_slabs: Vec::new(),
         }
     }
 
     unsafe fn alloc_from_new_slab(&mut self, size: usize, alignment: usize) -> *mut u8 {
-        if self.used_slabs.is_full() {
-            panic!("Obstack full! This should never happen.")
-        }
-
         let new_tip = Vec::with_capacity(Self::next_capacity(self.tip.capacity(), size, alignment));
         let old_tip = mem::replace(&mut self.tip, new_tip);
         self.used_slabs.push(old_tip);
@@ -100,7 +90,7 @@ impl Obstack {
     }
 
     pub fn new() -> Obstack {
-        Self::with_initial_capacity(128)
+        Self::with_initial_capacity(DEFAULT_INITIAL_CAPACITY-1)
     }
 
 

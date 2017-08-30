@@ -4,4 +4,3 @@ version = "0.1.0"
 authors = ["Peter Todd <pete@petertodd.org>"]
 
 [dependencies]
-arrayvec = "0.4.0"
