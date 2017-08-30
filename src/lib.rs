@@ -186,23 +186,8 @@ impl fmt::Display for Obstack {
     }
 }
 
-#[derive(Debug, Clone)]
-struct DropWatch<T: fmt::Debug>(T);
-
-impl<T: fmt::Debug> Drop for DropWatch<T> {
-    fn drop(&mut self) {
-        println!("dropping {:p} {:?}", self, self.0);
-    }
-}
-
 mod impls;
 pub use impls::*;
-
-#[no_mangle]
-pub fn test_all_return<'a>(stack: &'a Obstack, i: u64) -> (&'a u64, &'a u64) {
-    (stack.push_copy(i),
-     stack.push_copy(i + 0xdeadbeef))
-}
 
 #[cfg(test)]
 mod tests {
