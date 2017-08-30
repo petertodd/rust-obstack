@@ -19,31 +19,78 @@ impl<'a, T: ?Sized> Drop for Ref<'a, T> {
     }
 }
 
+#[derive(Debug)]
+struct AlignedVec<A>(Vec<A>);
+
+impl<A> AlignedVec<A> {
+    /// Convert bytes to #items, rounding up
+    fn bytes_to_items(n_bytes: usize) -> usize {
+        if n_bytes > 0 {
+            debug_assert!(mem::size_of::<A>().is_power_of_two());
+            ((n_bytes - 1) / mem::size_of::<A>()) + 1
+        } else {
+            0
+        }
+    }
+
+    fn items_to_bytes(n_items: usize) -> usize {
+        n_items * mem::size_of::<A>()
+    }
+
+    fn with_capacity_bytes(n_bytes: usize) -> AlignedVec<A> {
+        AlignedVec(Vec::with_capacity(Self::bytes_to_items(n_bytes)))
+    }
+
+    fn len_bytes(&self) -> usize {
+        Self::items_to_bytes(self.0.len())
+    }
+    fn capacity_bytes(&self) -> usize {
+        Self::items_to_bytes(self.0.capacity())
+    }
+    fn len_items(&self) -> usize {
+        self.0.len()
+    }
+    unsafe fn set_len_items(&mut self, new_len: usize) {
+        self.0.set_len(new_len);
+    }
+    fn capacity_items(&self) -> usize {
+        self.0.capacity()
+    }
+    fn as_ptr(&self) -> *const A {
+        self.0.as_ptr()
+    }
+    fn as_mut_ptr(&mut self) -> *mut A {
+        self.0.as_mut_ptr()
+    }
+}
 
 pub const DEFAULT_INITIAL_CAPACITY: usize = 256;
 
 #[derive(Debug)]
-struct State {
-    tip: Vec<u8>,
-    used_slabs: Vec<Vec<u8>>,
+struct State<A> {
+    tip: AlignedVec<A>,
+    used_slabs: Vec<AlignedVec<A>>,
 }
 
-impl State {
+impl<A> State<A> {
     fn next_capacity(prev_capacity: usize, required: usize, alignment: usize) -> usize {
         cmp::max(prev_capacity + 1, required + alignment)
             .checked_next_power_of_two()
             .expect("Obstack capacity overflow")
     }
 
-    fn new(min_initial_capacity: usize) -> State {
+    fn new(min_initial_capacity: usize) -> State<A> {
+        let capacity = Self::next_capacity(0, min_initial_capacity, 0);
         State {
-           tip: Vec::with_capacity(Self::next_capacity(0, min_initial_capacity, 0)),
+           tip: AlignedVec::with_capacity_bytes(capacity),
            used_slabs: Vec::new(),
         }
     }
 
-    unsafe fn alloc_from_new_slab(&mut self, size: usize, alignment: usize) -> *mut u8 {
-        let new_tip = Vec::with_capacity(Self::next_capacity(self.tip.capacity(), size, alignment));
+    unsafe fn alloc_from_new_slab(&mut self, size: usize, alignment: usize) -> *mut A {
+        let new_capacity = Self::next_capacity(self.tip.capacity_bytes(),
+                                               size, alignment);
+        let new_tip = AlignedVec::with_capacity_bytes(new_capacity);
         let old_tip = mem::replace(&mut self.tip, new_tip);
         self.used_slabs.push(old_tip);
 
@@ -51,22 +98,22 @@ impl State {
     }
 
     #[inline]
-    unsafe fn alloc(&mut self, size: usize, alignment: usize) -> *mut u8 {
+    unsafe fn alloc(&mut self, size: usize, alignment: usize) -> *mut A {
         let start_ptr = self.tip.as_mut_ptr()
-                                .offset(self.tip.len() as isize);
+                                .offset(self.tip.len_items() as isize);
 
         let padding = start_ptr as usize % alignment;
 
         debug_assert!(padding < alignment);
         debug_assert_eq!(padding, 0);
 
-        let start_ptr = start_ptr.offset(padding as isize);
+        let start_ptr = start_ptr.offset(AlignedVec::<A>::bytes_to_items(padding) as isize);
 
-        let new_used = self.tip.len() + padding + size;
+        let new_used = self.tip.len_items() + padding + AlignedVec::<A>::bytes_to_items(size);
 
-        if new_used <= self.tip.capacity() {
-            self.tip.set_len(new_used);
-            start_ptr
+        if new_used <= self.tip.capacity_items() {
+            self.tip.set_len_items(new_used);
+            start_ptr as *mut A
         } else {
             self.alloc_from_new_slab(size, alignment)
         }
@@ -74,12 +121,12 @@ impl State {
 }
 
 #[derive(Debug)]
-pub struct Obstack {
-    state: UnsafeCell<State>,
+pub struct Obstack<A = usize> {
+    state: UnsafeCell<State<A>>,
 }
 
-impl Obstack {
-    pub fn with_initial_capacity(n: usize) -> Obstack {
+impl<A> Obstack<A> {
+    pub fn with_initial_capacity(n: usize) -> Obstack<A> {
         let n = if n.is_power_of_two() { n } else { n.next_power_of_two() };
 
         let state = State::new(n);
@@ -88,7 +135,7 @@ impl Obstack {
         }
     }
 
-    pub fn new() -> Obstack {
+    pub fn new() -> Obstack<A> {
         Self::with_initial_capacity(DEFAULT_INITIAL_CAPACITY-1)
     }
 
@@ -130,7 +177,7 @@ impl Obstack {
     }
 
     #[inline]
-    pub fn alloc<'a, T: ?Sized>(&'a self, value_ref: &T) -> *mut u8 {
+    pub fn alloc<'a, T: ?Sized>(&'a self, value_ref: &T) -> *mut A {
         let size = mem::size_of_val(value_ref);
         let alignment = mem::align_of_val(value_ref);
 
@@ -140,7 +187,7 @@ impl Obstack {
                 state.alloc(size, alignment)
             }
         } else {
-            mem::align_of_val(value_ref) as *mut u8
+            mem::align_of_val(value_ref) as *mut A
         }
     }
 
@@ -149,9 +196,9 @@ impl Obstack {
         unsafe {
             let state = &*self.state.get();
 
-            let mut sum = state.tip.len();
+            let mut sum = state.tip.len_bytes();
             for slab in &state.used_slabs {
-                sum += slab.len();
+                sum += slab.len_bytes();
             }
             sum
         }
@@ -166,11 +213,13 @@ impl fmt::Display for Obstack {
             write!(f, "Obstack Slabs:\n")?;
 
             write!(f, "    {:p}: size = {}, used = {}\n",
-                   state.tip.as_ptr(), state.tip.capacity(), state.tip.len())?;
+                   state.tip.as_ptr(),
+                   state.tip.capacity_bytes(),
+                   state.tip.len_bytes())?;
 
             for slab in state.used_slabs.iter().rev() {
                 write!(f, "    {:p}: size = {}, used = {}\n",
-                       slab.as_ptr(), slab.capacity(), slab.len())?;
+                       slab.as_ptr(), slab.capacity_bytes(), slab.len_bytes())?;
             }
             Ok(())
         }
@@ -190,7 +239,7 @@ mod impls;
 pub use impls::*;
 
 #[no_mangle]
-pub fn test_all_return<'a>(stack: &'a Obstack, i: u64) -> (&'a u64, &'a u64) {
+pub fn test_all_return<'a>(stack: &'a Obstack<u8>, i: u64) -> (&'a u64, &'a u64) {
     (stack.push_copy(i),
      stack.push_copy(i + 0xdeadbeef))
 }
