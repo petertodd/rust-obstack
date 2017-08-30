@@ -211,6 +211,7 @@ mod tests {
     use std::cell::Cell;
     use std::ops::{Deref, DerefMut};
     use std::rc::Rc;
+    use std::thread;
 
     use rand::{Rng, thread_rng};
 
@@ -393,5 +394,27 @@ mod tests {
         for drop_count in drop_counts.iter() {
             assert_eq!(drop_count.get(), 1);
         }
+    }
+
+    #[test]
+    fn test_threads() {
+
+        // Perfectly ok to move a stack into a thread
+        let stack: Obstack = Obstack::new();
+        thread::spawn(move || {
+            let r = stack.push(0);
+            assert_eq!(*r, 0);
+        });
+
+        // ...including if it's been used, so long as all references have been dropped
+        let stack: Obstack = Obstack::new();
+        {
+            let _r1 = stack.push(String::from("String in main thread"));
+            let _r2 = stack.push(42);
+        }
+        thread::spawn(move || {
+            let r = stack.push(12345);
+            assert_eq!(*r, 12345);
+        });
     }
 }
