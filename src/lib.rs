@@ -1,8 +1,7 @@
-use std::cell::RefCell;
+use std::cell::UnsafeCell;
 use std::cmp;
 use std::fmt::Write;
 use std::fmt;
-use std::marker::PhantomData;
 use std::mem;
 use std::ptr;
 use std::slice;
@@ -76,7 +75,7 @@ impl State {
 
 #[derive(Debug)]
 pub struct Obstack {
-    state: RefCell<State>,
+    state: UnsafeCell<State>,
 }
 
 impl Obstack {
@@ -85,7 +84,7 @@ impl Obstack {
 
         let state = State::new(n);
         Obstack {
-            state: RefCell::new(state)
+            state: UnsafeCell::new(state)
         }
     }
 
@@ -137,8 +136,8 @@ impl Obstack {
 
         if size > 0 {
             unsafe {
-                self.state.borrow_mut()
-                          .alloc(size, alignment)
+                let state = &mut *self.state.get();
+                state.alloc(size, alignment)
             }
         } else {
             mem::align_of_val(value_ref) as *mut u8
@@ -147,31 +146,34 @@ impl Obstack {
 
     /// Return total bytes allocated
     pub fn allocated(&self) -> usize {
+        unsafe {
+            let state = &*self.state.get();
 
-        let state = self.state.borrow();
-
-        let mut sum = state.tip.len();
-        for slab in &state.used_slabs {
-            sum += slab.len();
+            let mut sum = state.tip.len();
+            for slab in &state.used_slabs {
+                sum += slab.len();
+            }
+            sum
         }
-        sum
     }
 }
 
 impl fmt::Display for Obstack {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        let state = self.state.borrow();
+        unsafe {
+            let state = &*self.state.get();
 
-        write!(f, "Obstack Slabs:\n")?;
+            write!(f, "Obstack Slabs:\n")?;
 
-        write!(f, "    {:p}: size = {}, used = {}\n",
-               state.tip.as_ptr(), state.tip.capacity(), state.tip.len())?;
-
-        for slab in state.used_slabs.iter().rev() {
             write!(f, "    {:p}: size = {}, used = {}\n",
-                   slab.as_ptr(), slab.capacity(), slab.len())?;
+                   state.tip.as_ptr(), state.tip.capacity(), state.tip.len())?;
+
+            for slab in state.used_slabs.iter().rev() {
+                write!(f, "    {:p}: size = {}, used = {}\n",
+                       slab.as_ptr(), slab.capacity(), slab.len())?;
+            }
+            Ok(())
         }
-        Ok(())
     }
 }
 
@@ -188,8 +190,9 @@ mod impls;
 pub use impls::*;
 
 #[no_mangle]
-pub fn test_all_return<'a>(stack: &'a Obstack, i: u64) -> &'a u64 {
-    stack.push_copy(i)
+pub fn test_all_return<'a>(stack: &'a Obstack, i: u64) -> (&'a u64, &'a u64) {
+    (stack.push_copy(i),
+     stack.push_copy(i + 0xdeadbeef))
 }
 
 #[cfg(test)]
