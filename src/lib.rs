@@ -1,3 +1,5 @@
+extern crate arrayvec;
+
 use std::cell::RefCell;
 use std::cmp;
 use std::fmt::Write;
@@ -6,6 +8,8 @@ use std::marker::PhantomData;
 use std::mem;
 use std::ptr;
 use std::slice;
+
+use arrayvec::{ArrayVec, Array};
 
 pub struct Ref<'a, T: 'a + ?Sized> {
     ptr: &'a mut T,
@@ -20,84 +24,60 @@ impl<'a, T: ?Sized> Drop for Ref<'a, T> {
     }
 }
 
-#[derive(Debug)]
-struct Slab<T: ?Sized> {
-    prev: Option<Box<Slab<[u8]>>>,
-    used: usize,
-    buf: T,
-}
 
-impl Slab<[u8]> {
-    fn new(capacity: usize) -> Box<Slab<[u8]>> {
-        assert!(capacity > 0);
-
-        let hdr = Slab {
-            prev: None,
-            used: 0,
-            buf: [0u8;0],
-        };
-
-        assert_eq!(mem::align_of_val(&hdr), mem::align_of::<usize>());
-
-        let allocation_size = mem::size_of_val(&hdr) + capacity;
-        let v_capacity = ((allocation_size - 1) / mem::size_of::<usize>()) + 1;
-        let mut v_usize: Vec<usize> = Vec::with_capacity(v_capacity);
-        unsafe {
-            v_usize.set_len(v_capacity);
-            let p_usize = Box::into_raw(v_usize.into_boxed_slice());
-            let dummy_slice = slice::from_raw_parts_mut(p_usize as *mut u8, capacity);
-            let ref_self = mem::transmute::<&mut [u8], &mut Slab<[u8]>>(dummy_slice);
-            Box::from_raw(ref_self)
-        }
-    }
-
-    fn walk<F>(&self, mut f: F)
-        where F: FnMut(&Slab<[u8]>)
-    {
-        f(self);
-        if let Some(ref prev) = self.prev {
-            prev.walk(f)
-        }
-    }
-}
+// Most processors have only 48 bits of actual virtual address space
+const MIN_SLAB_SIZE: usize = 256;
+const MAX_SLABS: usize = 48 - 8;
 
 #[derive(Debug)]
 struct State {
-    tip: Box<Slab<[u8]>>,
+    used_slabs: ArrayVec<[Vec<u8>; MAX_SLABS]>,
+    tip: Vec<u8>,
 }
 
 impl State {
-    fn new(initial_capacity: usize) -> State {
+    fn next_capacity(prev_capacity: usize, required: usize, alignment: usize) -> usize {
+        cmp::max(prev_capacity + 1, required + alignment)
+            .checked_next_power_of_two()
+            .expect("Obstack capacity overflow")
+    }
+
+    fn new(min_initial_capacity: usize) -> State {
         State {
-            tip: Slab::new(initial_capacity),
+           used_slabs: ArrayVec::new(),
+           tip: Vec::with_capacity(Self::next_capacity(0, min_initial_capacity, 0)),
         }
     }
 
-    fn alloc_from_new_slab(&mut self, size: usize, alignment: usize) -> *mut u8 {
-        let next_capacity = cmp::max(self.tip.buf.len() + 1, size)
-                            .next_power_of_two();
-
-        let mut new_tip = Slab::new(next_capacity);
-
-        unsafe {
-            let old_tip = mem::replace(&mut self.tip, mem::uninitialized());
-            assert!(new_tip.prev.is_none());
-            new_tip.prev = Some(old_tip);
-            mem::forget(mem::replace(&mut self.tip, new_tip));
+    unsafe fn alloc_from_new_slab(&mut self, size: usize, alignment: usize) -> *mut u8 {
+        if self.used_slabs.is_full() {
+            panic!("Obstack full! This should never happen.")
         }
+
+        let new_tip = Vec::with_capacity(Self::next_capacity(self.tip.capacity(), size, alignment));
+        let old_tip = mem::replace(&mut self.tip, new_tip);
+        self.used_slabs.push(old_tip);
+
         self.alloc(size, alignment)
     }
 
     #[inline]
-    fn alloc(&mut self, size: usize, alignment: usize) -> *mut u8 {
-        let used = self.tip.used;
-        let padding = used % alignment;
-        let new_used = used + padding + size;
+    unsafe fn alloc(&mut self, size: usize, alignment: usize) -> *mut u8 {
+        let start_ptr = self.tip.as_mut_ptr()
+                                .offset(self.tip.len() as isize);
 
-        if new_used <= self.tip.buf.len() {
-            let r = self.tip.buf[used .. ].as_mut_ptr();
-            self.tip.used = new_used;
-            r
+        let padding = start_ptr as usize % alignment;
+
+        debug_assert!(padding < alignment);
+        debug_assert_eq!(padding, 0);
+
+        let start_ptr = start_ptr.offset(padding as isize);
+
+        let new_used = self.tip.len() + padding + size;
+
+        if new_used <= self.tip.capacity() {
+            self.tip.set_len(new_used);
+            start_ptr
         } else {
             self.alloc_from_new_slab(size, alignment)
         }
@@ -166,8 +146,10 @@ impl Obstack {
         let alignment = mem::align_of_val(value_ref);
 
         if size > 0 {
-            self.state.borrow_mut()
-                      .alloc(size, alignment)
+            unsafe {
+                self.state.borrow_mut()
+                          .alloc(size, alignment)
+            }
         } else {
             mem::align_of_val(value_ref) as *mut u8
         }
@@ -175,14 +157,13 @@ impl Obstack {
 
     /// Return total bytes allocated
     pub fn allocated(&self) -> usize {
-        let mut sum = 0;
 
         let state = self.state.borrow();
 
-        state.tip.walk(|slab| {
-            sum += slab.used;
-        });
-
+        let mut sum = state.tip.len();
+        for slab in &state.used_slabs {
+            sum += slab.len();
+        }
         sum
     }
 }
@@ -190,15 +171,17 @@ impl Obstack {
 impl fmt::Display for Obstack {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         let state = self.state.borrow();
-        let mut idx = 0;
-        let mut r = String::new();
 
         write!(f, "Obstack Slabs:\n")?;
-        state.tip.walk(|slab| {
-            write!(&mut r, "    {:p}: size = {}, used = {}\n", slab, slab.buf.len(), slab.used).unwrap();
-            idx += 1;
-        });
-        write!(f, "{}", r)
+
+        write!(f, "    {:p}: size = {}, used = {}\n",
+               state.tip.as_ptr(), state.tip.capacity(), state.tip.len())?;
+
+        for slab in state.used_slabs.iter().rev() {
+            write!(f, "    {:p}: size = {}, used = {}\n",
+                   slab.as_ptr(), slab.capacity(), slab.len())?;
+        }
+        Ok(())
     }
 }
 
@@ -207,7 +190,7 @@ struct DropWatch<T: fmt::Debug>(T);
 
 impl<T: fmt::Debug> Drop for DropWatch<T> {
     fn drop(&mut self) {
-        println!("dropping {:?}", self.0);
+        println!("dropping {:p} {:?}", self, self.0);
     }
 }
 
@@ -215,14 +198,8 @@ mod impls;
 pub use impls::*;
 
 #[no_mangle]
-pub fn test_all_return(i: u64) -> Obstack {
-    let stack = Obstack::new();
-
-    for i in 0 .. 10 {
-        let orig = DropWatch(i);
-        let r = stack.push(orig.clone());
-    }
-    stack
+pub fn test_all_return<'a>(stack: &'a Obstack, i: u64) -> &'a u64 {
+    stack.push_copy(i)
 }
 
 #[cfg(test)]
@@ -240,7 +217,8 @@ mod tests {
         println!("{}", &stack);
 
         let mut v = Vec::new();
-        for i in 0 .. 500 {
+        for i in 0 .. 10 {
+            println!("{:?}", stack);
             let orig = DropWatch(i);
             let r = stack.push(orig.clone());
             v.push((r, orig));
