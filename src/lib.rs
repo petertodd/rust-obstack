@@ -32,8 +32,7 @@ struct State<A> {
 impl<A> State<A> {
     fn next_capacity(prev_capacity: usize, required: usize, alignment: usize) -> usize {
         cmp::max(prev_capacity + 1, required + alignment)
-            .checked_next_power_of_two()
-            .expect("Obstack capacity overflow")
+            .next_power_of_two()
     }
 
     fn new(min_initial_capacity: usize) -> State<A> {
@@ -44,6 +43,7 @@ impl<A> State<A> {
         }
     }
 
+    #[inline(never)]
     unsafe fn alloc_from_new_slab(&mut self, size: usize, alignment: usize) -> *mut A {
         let new_capacity = Self::next_capacity(self.tip.capacity_bytes(),
                                                size, alignment);
