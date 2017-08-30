@@ -1,3 +1,6 @@
+#[cfg(test)]
+extern crate rand;
+
 use std::cell::UnsafeCell;
 use std::cmp;
 use std::fmt;
@@ -83,7 +86,7 @@ pub struct Obstack<A = usize> {
 }
 
 impl<A> Obstack<A> {
-    pub fn with_initial_capacity(n: usize) -> Obstack<A> {
+    pub fn with_initial_capacity(n: usize) -> Self {
         let n = if n.is_power_of_two() { n } else { n.next_power_of_two() };
 
         let state = State::new(n);
@@ -92,7 +95,7 @@ impl<A> Obstack<A> {
         }
     }
 
-    pub fn new() -> Obstack<A> {
+    pub fn new() -> Self {
         Self::with_initial_capacity(DEFAULT_INITIAL_CAPACITY-1)
     }
 
@@ -205,29 +208,190 @@ pub fn test_all_return<'a>(stack: &'a Obstack, i: u64) -> (&'a u64, &'a u64) {
 mod tests {
     use super::*;
 
+    use std::cell::Cell;
+    use std::ops::{Deref, DerefMut};
+    use std::rc::Rc;
+
+    use rand::{Rng, thread_rng};
+
     #[test]
-    fn test() {
-        struct Empty([usize;0]);
-        use std::ops::Deref;
-        println!("{:p}", Box::new(Empty([])).deref());
-
-        let stack = Obstack::new();
-
-        println!("{}", &stack);
+    fn test_consistency_simple() {
+        let stack: Obstack = Obstack::new();
 
         let mut v = Vec::new();
-        for i in 0 .. 10 {
-            println!("{:?}", stack);
-            let orig = DropWatch(i);
-            let r = stack.push(orig.clone());
-            v.push((r, orig));
+        for i in 0 .. 10_000 {
+            let r: &mut usize = stack.push_copy(i);
+            assert_eq!(*r, i);
+            v.push((i, r));
         }
 
-        /*for (r, orig) in v {
-            assert_eq!(*r, orig);
-        }*/
+        // After filling the stack every value should have it's original value
+        for &(ref orig, ref stack_ref) in v.iter() {
+            assert_eq!(*orig, **stack_ref);
+        }
 
-        println!("{:?}", stack);
-        println!("{}", stack);
+        // Change every value and make sure what changed was what we expected
+        for &mut(_, ref mut stack_ref) in v.iter_mut() {
+            **stack_ref = **stack_ref + 42;
+        }
+        for &(ref orig, ref stack_ref) in v.iter() {
+            assert_eq!(*orig + 42, **stack_ref);
+        }
+    }
+
+    #[test]
+    fn test_consistency_multiple_types() {
+        let stack: Obstack = Obstack::new();
+
+        #[derive(Debug)]
+        enum Multi<'a> {
+            Bool((bool, &'a mut bool)),
+            U32((u32, &'a mut u32)),
+            U64((u64, &'a mut u64)),
+            ArrayU8(([u8;5], &'a mut [u8;5])),
+            Unit(&'a mut ()),
+            UnitRef(Ref<'a, ()>),
+            RcBool((Rc<bool>, Ref<'a, Rc<bool>>)),
+            BoxU64((u64, Ref<'a, Box<u64>>)),
+        }
+
+        fn fill<'a>(stack: &'a Obstack) -> Multi<'a> {
+            match thread_rng().next_u32() % 8 {
+                0 => {
+                    let value = thread_rng().gen();
+                    Multi::Bool((value, stack.push_copy(value)))
+                },
+                1 => {
+                    let value = thread_rng().gen();
+                    Multi::U32((value, stack.push_copy(value)))
+                },
+                2 => {
+                    let value = thread_rng().gen();
+                    Multi::U64((value, stack.push_copy(value)))
+                },
+                3 => {
+                    let value = thread_rng().gen();
+                    Multi::ArrayU8((value, stack.push_copy(value)))
+                },
+                4 => {
+                    Multi::Unit(stack.push_copy(()))
+                },
+                5 => {
+                    Multi::UnitRef(stack.push(()))
+                },
+                6 => {
+                    let rc_bool = Rc::new(thread_rng().gen::<bool>());
+                    Multi::RcBool((rc_bool.clone(), stack.push(rc_bool)))
+                },
+                7 => {
+                    let i = thread_rng().gen();
+                    Multi::BoxU64((i, stack.push(Box::new(i))))
+                },
+                _ => unreachable!(),
+            }
+        }
+
+        fn check(entry: &Multi) {
+            match *entry {
+                Multi::Bool((ref v, ref r))    => assert_eq!(v, *r),
+                Multi::U32((ref v, ref r))     => assert_eq!(v, *r),
+                Multi::U64((ref v, ref r))     => assert_eq!(v, *r),
+                Multi::ArrayU8((ref v, ref r)) => assert_eq!(v, *r),
+                Multi::Unit(ref r)             => assert_eq!(&(), r.deref()),
+                Multi::UnitRef(ref r)          => assert_eq!(&(), r.deref()),
+                Multi::RcBool((ref v, ref r))  => assert!(Rc::ptr_eq(v, r)),
+                Multi::BoxU64((ref v, ref r))  => assert_eq!(*v, ***r),
+            }
+        }
+
+        fn mutate(entry: &mut Multi) {
+            match *entry {
+                Multi::Bool((ref mut v, ref mut r)) => {
+                    let nv = thread_rng().gen();
+                    *v = nv;
+                    **r = nv;
+                },
+                Multi::U32((ref mut v, ref mut r)) => {
+                    let nv = thread_rng().gen();
+                    *v = nv;
+                    **r = nv;
+                },
+                Multi::U64((ref mut v, ref mut r)) => {
+                    let nv = thread_rng().gen();
+                    *v = nv;
+                    **r = nv;
+                },
+                Multi::ArrayU8((ref mut v, ref mut r)) => {
+                    let nv = thread_rng().gen();
+                    *v = nv;
+                    **r = nv;
+                },
+                Multi::Unit(ref mut r) => { **r = (); },
+                Multi::UnitRef(ref mut r) => { *r.deref_mut() = (); },
+                Multi::RcBool(_) => {},
+                Multi::BoxU64((ref mut v, ref mut r)) => {
+                    let nv = thread_rng().gen();
+                    *v = nv;
+                    *(r.deref_mut().deref_mut()) = nv;
+                },
+            }
+        }
+
+        let mut v = Vec::new();
+        for _ in 0 .. 10_000 {
+            let entry = fill(&stack);
+            check(&entry);
+            v.push(entry);
+        }
+
+        for entry_ref in v.iter() {
+            check(entry_ref);
+        }
+        for entry_ref in v.iter_mut() {
+            mutate(entry_ref);
+        }
+        for entry_ref in v.iter() {
+            check(entry_ref);
+        }
+    }
+
+    #[test]
+    fn test_ref_drop() {
+        let stack: Obstack = Obstack::new();
+
+        struct DropCounter<'a> {
+            count_ref: &'a Cell<usize>,
+        }
+
+        impl<'a> Drop for DropCounter<'a> {
+            fn drop(&mut self) {
+                self.count_ref.set(self.count_ref.get() + 1);
+            }
+        }
+
+        let drop_counts = vec![Cell::new(0); 10000];
+        let mut dropcounter_refs = Vec::new();
+
+        for count_ref in drop_counts.iter() {
+            assert_eq!(count_ref.get(), 0);
+
+            let drop_counter = DropCounter {
+                count_ref: count_ref,
+            };
+
+            let r = stack.push(drop_counter);
+            if thread_rng().gen() {
+                dropcounter_refs.push(r);
+                assert_eq!(count_ref.get(), 0);
+            } else {
+                mem::drop(r);
+                assert_eq!(count_ref.get(), 1);
+            }
+        }
+
+        mem::drop(dropcounter_refs);
+        for drop_count in drop_counts.iter() {
+            assert_eq!(drop_count.get(), 1);
+        }
     }
 }

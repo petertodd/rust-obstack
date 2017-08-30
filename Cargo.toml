@@ -3,7 +3,8 @@ name = "obstack"
 version = "0.1.0"
 authors = ["Peter Todd <pete@petertodd.org>"]
 
-[dependencies]
+[dev-dependencies]
+rand = "0.3.16"
 bencher = "0.1.4"
 
 [[bench]]
