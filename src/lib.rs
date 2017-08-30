@@ -1,10 +1,12 @@
 use std::cell::UnsafeCell;
 use std::cmp;
-use std::fmt::Write;
 use std::fmt;
 use std::mem;
 use std::ptr;
 use std::slice;
+
+mod alignedvec;
+use alignedvec::AlignedVec;
 
 pub struct Ref<'a, T: 'a + ?Sized> {
     ptr: &'a mut T,
@@ -16,51 +18,6 @@ impl<'a, T: ?Sized> Drop for Ref<'a, T> {
         unsafe {
             ptr::drop_in_place(self.ptr);
         }
-    }
-}
-
-#[derive(Debug)]
-struct AlignedVec<A>(Vec<A>);
-
-impl<A> AlignedVec<A> {
-    /// Convert bytes to #items, rounding up
-    fn bytes_to_items(n_bytes: usize) -> usize {
-        if n_bytes > 0 {
-            debug_assert!(mem::size_of::<A>().is_power_of_two());
-            ((n_bytes - 1) / mem::size_of::<A>()) + 1
-        } else {
-            0
-        }
-    }
-
-    fn items_to_bytes(n_items: usize) -> usize {
-        n_items * mem::size_of::<A>()
-    }
-
-    fn with_capacity_bytes(n_bytes: usize) -> AlignedVec<A> {
-        AlignedVec(Vec::with_capacity(Self::bytes_to_items(n_bytes)))
-    }
-
-    fn len_bytes(&self) -> usize {
-        Self::items_to_bytes(self.0.len())
-    }
-    fn capacity_bytes(&self) -> usize {
-        Self::items_to_bytes(self.0.capacity())
-    }
-    fn len_items(&self) -> usize {
-        self.0.len()
-    }
-    unsafe fn set_len_items(&mut self, new_len: usize) {
-        self.0.set_len(new_len);
-    }
-    fn capacity_items(&self) -> usize {
-        self.0.capacity()
-    }
-    fn as_ptr(&self) -> *const A {
-        self.0.as_ptr()
-    }
-    fn as_mut_ptr(&mut self) -> *mut A {
-        self.0.as_mut_ptr()
     }
 }
 
@@ -239,7 +196,7 @@ mod impls;
 pub use impls::*;
 
 #[no_mangle]
-pub fn test_all_return<'a>(stack: &'a Obstack<u8>, i: u64) -> (&'a u64, &'a u64) {
+pub fn test_all_return<'a>(stack: &'a Obstack, i: u64) -> (&'a u64, &'a u64) {
     (stack.push_copy(i),
      stack.push_copy(i + 0xdeadbeef))
 }
