@@ -9,8 +9,6 @@ a single `Obstack` can contain values with any number of different types.
 
 For `Copy` types pushing a value to an `Obstack` returns a standard mutable reference:
 
-    # use obstack::Obstack;
-    # let stack = Obstack::<usize>::new();
     let r: &mut u8 = stack.push_copy(42);
     assert_eq!(*r, 42);
 
