@@ -45,6 +45,7 @@ use std::cmp;
 use std::fmt;
 use std::mem;
 use std::ptr;
+use std::slice;
 
 mod alignedvec;
 use alignedvec::AlignedVec;
@@ -118,6 +119,84 @@ impl Obstack {
             let r = &mut *(self.alloc(&value) as *mut T);
             *r = value;
             r
+        }
+    }
+
+    /// Copies values from a slice to the `Obstack`.
+    ///
+    /// Returns a mutable reference to a newly allocated slice:
+    ///
+    /// ```
+    /// # use obstack::Obstack;
+    /// # let stack = Obstack::new();
+    /// let v: Box<[u8]> = Box::new([1,2,3,4,5]);
+    /// let r: &mut [u8] = stack.copy_from_slice(&v[0..3]);
+    ///
+    /// assert_eq!(r.len(), 3);
+    /// assert_eq!(r, &[1,2,3][..]);
+    /// ```
+    ///
+    /// Zero-length slices work as expected without allocations:
+    ///
+    /// ```
+    /// # use obstack::Obstack;
+    /// # let stack = Obstack::new();
+    /// let prev_used = stack.bytes_used();
+    /// let r: &mut [u8] = stack.copy_from_slice(&[]);
+    ///
+    /// assert_eq!(prev_used, stack.bytes_used());
+    /// assert_eq!(r.len(), 0);
+    /// assert_eq!(r, &[]);
+    /// ```
+    ///
+    /// As do slices of zero-sized types:
+    ///
+    /// ```
+    /// # use std::usize;
+    /// # use obstack::Obstack;
+    /// # let stack = Obstack::new();
+    /// let v: Box<[()]> = Box::new([(); 1_000]);
+    /// let prev_used = stack.bytes_used();
+    /// let r: &mut [()] = stack.copy_from_slice(&v);
+    ///
+    /// assert_eq!(prev_used, stack.bytes_used());
+    /// assert_eq!(r.len(), 1_000);
+    /// assert!(r == &[(); 1_000][..]);
+    /// ```
+    #[inline]
+    pub fn copy_from_slice<'a, T>(&'a self, src: &[T]) -> &'a mut [T]
+        where T: Copy,
+    {
+        unsafe {
+            let ptr = self.alloc(src) as *mut T;
+            let r = slice::from_raw_parts_mut(ptr, src.len());
+            r.copy_from_slice(src);
+            r
+        }
+    }
+
+    /// Returns the total bytes currently used by values.
+    ///
+    /// Includes bytes used for alignment padding. However, this figure is *not* the total size
+    /// *allocated* by the `Obstack`, which would include bytes allocated for parts of segments
+    /// that haven't been used yet. Thus the return value of this method will change after every
+    /// non-zero-sized value allocated.
+    ///
+    /// `bytes_used` always starts at zero:
+    ///
+    /// ```
+    /// # use obstack::Obstack;
+    /// let stack = Obstack::new();
+    /// assert_eq!(stack.bytes_used(), 0);
+    /// ```
+    pub fn bytes_used(&self) -> usize {
+        unsafe {
+            let state = &*self.state.get();
+
+            state.tip.len_bytes()
+            + state.used_slabs.iter()
+                              .map(|used_slab| used_slab.len_bytes())
+                              .sum::<usize>()
         }
     }
 
