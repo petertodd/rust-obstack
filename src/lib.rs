@@ -219,9 +219,8 @@ impl Obstack {
 
 /// A wrapper referencing a value in an `Obstack`.
 ///
-/// A `Ref` value is owns the value it references, and will invoke `drop` on the value when the
-/// `Ref` goes out of scope. Effectively a `Ref` is a `Box` that uses an `Obstack` rather than the
-/// heap.
+/// A `Ref` value owns the value it references, and will invoke `drop` on the value when the `Ref`
+/// goes out of scope. Effectively a `Ref` is a `Box` that uses an `Obstack` rather than the heap.
 pub struct Ref<'a, T: 'a + ?Sized> {
     ptr: &'a mut T,
 }
