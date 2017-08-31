@@ -1,6 +1,6 @@
 [package]
 name = "obstack"
-version = "0.1.2-PENDING"
+version = "0.1.2"
 authors = ["Peter Todd <pete@petertodd.org>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/petertodd/rust-obstacks/"
