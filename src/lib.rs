@@ -221,8 +221,56 @@ impl Obstack {
 ///
 /// A `Ref` value owns the value it references, and will invoke `drop` on the value when the `Ref`
 /// goes out of scope. Effectively a `Ref` is a `Box` that uses an `Obstack` rather than the heap.
+///
+/// The inherent methods of `Ref` are all associated functions, which means you have to call them
+/// as e.g. `Ref::unwrap(value)` instead of `value.unwrap()`. This avoids conflicts with methods of
+/// the inner type `T`.
 pub struct Ref<'a, T: 'a + ?Sized> {
     ptr: &'a mut T,
+}
+
+impl<'a, T: ?Sized> Ref<'a, T> {
+    /// Returns the owned value, consuming the `Ref`.
+    ///
+    /// This allows the value to taken out of the `Obstack` and used even after it goes out of
+    /// scope:
+    ///
+    /// ```
+    /// # use obstack::{Obstack, Ref};
+    /// fn f() -> String {
+    ///     let stack = Obstack::new();
+    ///     let r = stack.push(String::from("foo"));
+    ///
+    ///     Ref::unwrap(r)
+    /// }
+    ///
+    /// assert_eq!(f(), "foo");
+    /// ```
+    ///
+    /// Since obstacks only free memory when they go out of scope, the `bytes_used` remains
+    /// unchanged:
+    ///
+    /// ```
+    /// # use obstack::{Obstack, Ref};
+    /// # let stack = Obstack::new();
+    /// let r = stack.push(String::new());
+    ///
+    /// let used = stack.bytes_used();
+    /// let inner = Ref::unwrap(r);
+    ///
+    /// assert_eq!(used, stack.bytes_used());
+    /// # assert_eq!(inner, "");
+    /// ```
+    #[inline]
+    pub fn unwrap(this: Self) -> T
+        where T: Sized
+    {
+        unsafe {
+            let ptr: *const T = this.ptr;
+            mem::forget(this);
+            ptr::read(ptr)
+        }
+    }
 }
 
 impl<'a, T: ?Sized> Drop for Ref<'a, T> {
