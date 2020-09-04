@@ -604,4 +604,18 @@ mod tests {
         // Dropping the stack itself does nothing to the drop counter of course.
         assert_eq!(drop_count.get(), 1);
     }
+
+    #[test]
+    fn test_large_alignment() {
+        // Large enough that the alignment overflows the default initial capacity
+        #[repr(align(256))]
+        #[derive(Copy, Clone)]
+        struct LargeAlign(u8);
+
+        let obstack = Obstack::new();
+        let val_ref = obstack.push_copy(LargeAlign(0));
+
+        let address = val_ref as *mut _ as usize;
+        assert!(address % std::mem::align_of::<LargeAlign>() == 0);
+    }
 }
