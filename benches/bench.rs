@@ -90,8 +90,6 @@ fn str_cons_list_stack(bench: &mut Bencher) {
         Cell(T, Ref<'a, RefCons<'a, T>>),
     }
 
-    use std::string::ToString;
-
     bench.iter(|| {
         let stack = Obstack::new();
 
@@ -109,8 +107,6 @@ fn str_cons_list_box(bench: &mut Bencher) {
         Nil,
         Cell(T, Box<BoxCons<T>>),
     }
-
-    use std::string::ToString;
 
     bench.iter(|| {
         let mut tip = BoxCons::Nil;
